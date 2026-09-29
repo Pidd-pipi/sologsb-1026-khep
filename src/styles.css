@@ -178,6 +178,47 @@ button, input, textarea, select { font: inherit; }
 .diff-list article.removed > span { color: #a2191f; }
 .diff-list b { font-size: 12px; }
 .diff-list p { margin: 3px 0 0; color: #6f6f6f; font-size: 10px; }
+.diff-subject { font-style: normal; font-weight: 600; color: #6929c4; }
+.issue-actions { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+
+/* 辨音对比卡 */
+.contrast-card { padding: 20px; }
+.card-strip { margin-top: 14px; display: grid; gap: 10px; }
+.contrast-row { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(220px, 1.4fr) auto; gap: 14px; align-items: center; padding: 14px; border: 1px solid #d9fbfb; border-left: 4px solid #005d5d; background: #f4fdfe; }
+.contrast-row.missing { border-color: #ffd7d9; border-left-color: #da1e28; background: #fff5f5; }
+.contrast-row.duplicate { border-color: #e8daff; border-left-color: #8a3ffc; background: #f9f7ff; }
+.contrast-row.unattached { border-color: #e0e0e0; border-left-color: #8d8d8d; background: #f8f8f8; }
+.contrast-sides { display: flex; align-items: center; gap: 12px; }
+.contrast-sides > div { flex: 1; min-width: 0; }
+.contrast-sides b { display: block; font: 600 20px/1.1 "IBM Plex Mono", monospace; color: #161616; }
+.contrast-sides span { display: block; margin-top: 3px; overflow: hidden; color: #6f6f6f; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.contrast-sides i { color: #005d5d; font-style: normal; font-size: 16px; }
+.contrast-meta small { display: block; margin-top: 6px; color: #6f6f6f; font-size: 10px; line-height: 1.5; }
+.contrast-actions { display: flex; gap: 2px; }
+.card-board { margin-top: 34px; }
+.card-manager { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.managed-card { padding: 16px; border: 1px solid #d9fbfb; border-top: 4px solid #198038; background: #fff; }
+.managed-card.missing { border-color: #ffd7d9; border-top-color: #da1e28; }
+.managed-card.duplicate { border-color: #e8daff; border-top-color: #8a3ffc; }
+.managed-card.unattached { border-color: #e0e0e0; border-top-color: #8d8d8d; }
+.managed-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.managed-head small { color: #8d8d8d; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.managed-sides { margin: 12px 0; display: flex; align-items: stretch; gap: 10px; }
+.managed-sides > div { flex: 1; padding: 10px; background: #f4f4f4; }
+.managed-sides span { display: block; color: #8d8d8d; font-size: 9px; letter-spacing: .08em; }
+.managed-sides b { display: block; margin: 2px 0; font: 600 18px/1.1 "IBM Plex Mono", monospace; }
+.managed-sides em { font-style: normal; color: #525252; font-size: 11px; }
+.managed-sides i { align-self: center; color: #005d5d; font-style: normal; }
+.card-alert { margin: 0 0 8px; padding: 8px 10px; color: #a2191f; background: #fff1f1; font-size: 11px; line-height: 1.6; }
+.card-alert strong { font-family: "IBM Plex Mono", monospace; }
+.card-note { margin: 0 0 8px; color: #6f6f6f; font-size: 11px; line-height: 1.6; }
+.managed-actions { display: flex; gap: 2px; flex-wrap: wrap; }
+.lesson-contrast { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; padding: 8px 10px; border-left: 3px solid #005d5d; background: #f4fdfe; }
+.lesson-contrast b { font-size: 10px; color: #005d5d; }
+.lesson-contrast span { font: 500 10px "IBM Plex Mono", monospace; color: #161616; }
+.lesson-contrast i { font-style: normal; color: #005d5d; }
+.card-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; margin-bottom: 6px; }
+.card-form-hint { margin: 0 0 14px; color: #525252; font-size: 12px; line-height: 1.7; }
 .app-footer { min-height: 46px; padding: 14px 24px; display: flex; justify-content: space-between; gap: 20px; color: #c6c6c6; background: #262626; font-size: 10px; }
 @media (max-width: 1180px) {
   .compose-layout { grid-template-columns: 280px 1fr; }
@@ -200,5 +241,7 @@ button, input, textarea, select { font: inherit; }
   .device-preview.tablet, .device-preview.desktop { width: 100%; }
   .rule-grid, .version-layout-svelte { grid-template-columns: 1fr; }
   .issue-board > article { grid-template-columns: 38px 1fr; }
-  .issue-board > article > button { grid-column: 2; width: fit-content; }
+  .issue-board > article > button, .issue-board > article > .issue-actions { grid-column: 2; width: fit-content; }
+  .contrast-row { grid-template-columns: 1fr; gap: 10px; }
+  .card-form-grid { grid-template-columns: 1fr; }
 }
