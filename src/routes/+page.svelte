@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import {
     Button,
     Checkbox,
@@ -37,6 +37,18 @@
     savedAt: string;
     note: string;
     activities: Activity[];
+    contrastCards: ContrastCard[];
+  }
+
+  interface ContrastCard {
+    id: string;
+    pairKey: string;
+    leftPhoneme: string;
+    rightPhoneme: string;
+    leftExample: string;
+    rightExample: string;
+    activityId: string;
+    createdAt: string;
   }
 
   interface Course {
@@ -46,6 +58,7 @@
     ageRange: string;
     objective: string;
     activities: Activity[];
+    contrastCards: ContrastCard[];
     versions: CourseVersion[];
     updatedAt: string;
   }
@@ -57,6 +70,17 @@
     category: string;
     title: string;
     detail: string;
+    pair?: { left: string; right: string; pairKey: string };
+  }
+
+  interface ContrastCardStatus {
+    card: ContrastCard;
+    activity: Activity | undefined;
+    selfValid: boolean;
+    active: boolean;
+    reasons: string[];
+    missingPhonemes: string[];
+    pairConflictCardId: string | undefined;
   }
 
   interface VersionDiff {
@@ -64,6 +88,7 @@
     title: string;
     kind: 'added' | 'removed' | 'changed';
     detail: string;
+    entity: 'activity' | 'contrast-card';
   }
 
   const STORAGE_KEY = 'sologsb-1026-phonics-course-v1';
@@ -128,13 +153,21 @@
         accessibility: '提供分句导航、朗读速度控制和高对比模式。', duration: 12, feedback: ''
       }
     ],
+    contrastCards: [
+      {
+        id: 'c-1', pairKey: phonemePairKey('/m/', '/n/'), leftPhoneme: '/m/', rightPhoneme: '/n/',
+        leftExample: 'map（地图）', rightExample: 'nap（小睡）', activityId: 'a-7',
+        createdAt: '2026-09-24T16:10:00+08:00'
+      }
+    ],
     versions: [
       {
         id: 'v-1', label: '初稿', savedAt: '2026-09-21T10:00:00+08:00', note: '完成音素和基础拼读活动。',
-        activities: []
+        activities: [], contrastCards: []
       },
       {
         id: 'v-2', label: '增加句子迁移', savedAt: '2026-09-24T15:30:00+08:00', note: '补充 A man sat and had a nap.',
+        contrastCards: [],
         activities: [
           {
             id: 'a-1', type: '音素', title: '听音游戏：认识 /m/', content: '/m/', phonemes: ['/m/'], dependencies: [], difficulty: 1,
@@ -172,10 +205,21 @@
   let selectedActivity: Activity | null = null;
   let diagnostics: Diagnostic[] = [];
   let versionDiff: VersionDiff[] = [];
+  let highlightCardId = '';
 
   $: selectedActivity = course.activities.find((activity) => activity.id === selectedActivityId) ?? course.activities[0] ?? null;
-  $: diagnostics = analyzeCourse(course);
+  $: cardStatuses = evaluateContrastCards(course.activities, course.contrastCards);
+  $: cardStatusMap = new Map(cardStatuses.map((status) => [status.card.id, status]));
+  $: activeCardByActivity = new Map(
+    cardStatuses.filter((status) => status.active).map((status) => [status.card.activityId, status])
+  );
+  $: diagnostics = analyzeCourse(course, cardStatuses);
   $: versionDiff = compareCourseVersions(course, compareBaseId, compareTargetId);
+  $: if (highlightCardId && activeView === 'compose') {
+    tick().then(() => {
+      document.getElementById(`contrast-card-${highlightCardId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  }
   $: errorCount = diagnostics.filter((issue) => issue.level === 'error').length;
   $: warningCount = diagnostics.filter((issue) => issue.level === 'warning').length;
   $: totalMinutes = course.activities.reduce((sum, activity) => sum + activity.duration, 0);
@@ -210,7 +254,17 @@
   function migrateCourse(value: Course): Course {
     if (!value.id || !Array.isArray(value.activities)) return initialCourse();
     value.versions ??= [];
+    value.contrastCards ??= [];
+    value.versions.forEach((version) => { version.contrastCards ??= []; });
     return value;
+  }
+
+  function normalizePhoneme(value: string): string {
+    return value.trim().replace(/\s+/g, '');
+  }
+
+  function phonemePairKey(left: string, right: string): string {
+    return [normalizePhoneme(left), normalizePhoneme(right)].sort().join('|');
   }
 
   function commit(recipe: (draft: Course) => void): void {
@@ -309,8 +363,10 @@
       draft.activities.forEach((activity) => {
         activity.dependencies = activity.dependencies.filter((dependency) => dependency !== id);
       });
+      draft.contrastCards = draft.contrastCards.filter((card) => card.activityId !== id);
     });
     selectedActivityId = course.activities[0]?.id ?? '';
+    if (highlightCardId && !course.contrastCards.some((card) => card.id === highlightCardId)) highlightCardId = '';
   }
 
   function duplicateActivity(): void {
@@ -350,13 +406,75 @@
     updateActivity('phonemes', value.split(/[\s,，、]+/).map((item) => item.trim()).filter(Boolean));
   }
 
+  function createContrastCard(left: string, right: string): string {
+    const pairKey = phonemePairKey(left, right);
+    const existing = course.contrastCards.find((card) => card.pairKey === pairKey);
+    if (existing) return existing.id;
+    const practiceId = course.activities.find((activity) => activity.type === '练习')?.id ?? '';
+    const id = `c-${Date.now()}`;
+    commit((draft) => {
+      draft.contrastCards.push({
+        id, pairKey, leftPhoneme: normalizePhoneme(left), rightPhoneme: normalizePhoneme(right),
+        leftExample: '', rightExample: '', activityId: practiceId, createdAt: new Date().toISOString()
+      });
+    });
+    selectedActivityId = practiceId || course.activities[0]?.id || '';
+    activeView = 'compose';
+    highlightCardId = id;
+    return id;
+  }
+
+  function updateContrastCard(cardId: string, field: keyof ContrastCard, value: string): void {
+    commit((draft) => {
+      const card = draft.contrastCards.find((item) => item.id === cardId);
+      if (!card) return;
+      if (field === 'leftPhoneme' || field === 'rightPhoneme') {
+        card[field] = normalizePhoneme(value);
+        card.pairKey = phonemePairKey(card.leftPhoneme, card.rightPhoneme);
+      } else {
+        (card as unknown as Record<string, string>)[field] = value;
+      }
+    });
+  }
+
+  function deleteContrastCard(cardId: string): void {
+    commit((draft) => {
+      draft.contrastCards = draft.contrastCards.filter((card) => card.id !== cardId);
+    });
+    if (highlightCardId === cardId) highlightCardId = '';
+  }
+
+  function focusContrastCard(cardId: string): void {
+    const card = course.contrastCards.find((item) => item.id === cardId);
+    if (!card) return;
+    selectedActivityId = card.activityId || course.activities[0]?.id || '';
+    activeView = 'compose';
+    highlightCardId = cardId;
+  }
+
+  function addMissingPhonemeActivity(phoneme: string, activityId: string): void {
+    const id = `a-${Date.now()}`;
+    commit((draft) => {
+      const index = draft.activities.findIndex((activity) => activity.id === activityId);
+      draft.activities.splice(index, 0, {
+        id, type: '音素', title: `听音游戏：认识 ${phoneme}`, content: phoneme,
+        phonemes: [phoneme], dependencies: [], difficulty: 1,
+        prompt: `观察口型、听辨 ${phoneme}，再跟读三遍。`,
+        accessibility: '提供口型示范图、慢速音频和可重复播放按钮。', duration: 6, feedback: ''
+      });
+    });
+    selectedActivityId = id;
+    activeView = 'compose';
+  }
+
   function saveVersion(): void {
     const versionNumber = course.versions.length + 1;
     commit((draft) => {
       draft.versions.push({
         id: `v-${Date.now()}`, label: `版本 ${versionNumber}`, savedAt: new Date().toISOString(),
         note: `保存 ${draft.activities.length} 个活动，总计 ${draft.activities.reduce((sum, item) => sum + item.duration, 0)} 分钟。`,
-        activities: structuredClone(draft.activities)
+        activities: structuredClone(draft.activities),
+        contrastCards: structuredClone(draft.contrastCards)
       });
     });
     const latest = course.versions.at(-1);
@@ -387,7 +505,66 @@
     activeView = 'compose';
   }
 
-  function analyzeCourse(current: Course): Diagnostic[] {
+  function findEarliestPhonemeActivity(activities: Activity[], phoneme: string): Activity | undefined {
+    for (const activity of activities) {
+      if (activity.type === '音素' && activity.phonemes.includes(phoneme)) return activity;
+    }
+    return undefined;
+  }
+
+  function evaluateContrastCards(activities: Activity[], cards: ContrastCard[]): ContrastCardStatus[] {
+    const byId = new Map(activities.map((activity) => [activity.id, activity]));
+    const statuses: ContrastCardStatus[] = cards.map((card) => {
+      const activity = byId.get(card.activityId);
+      const left = normalizePhoneme(card.leftPhoneme);
+      const right = normalizePhoneme(card.rightPhoneme);
+      const reasons: string[] = [];
+      const missingPhonemes: string[] = [];
+
+      if (!activity) reasons.push('挂载的练习活动已不存在，请重新选择或删除该卡。');
+      else if (activity.type !== '练习') reasons.push(`挂载的“${activity.title}”不是练习活动。`);
+
+      if (!left || !right) reasons.push('左右音素都需要填写。');
+      else if (left === right) reasons.push('左右音素相同，无法构成对比。');
+
+      if (!card.leftExample.trim() || !card.rightExample.trim()) reasons.push('左右两侧的示例词都需要填写。');
+
+      if (activity?.type === '练习' && left && right && left !== right) {
+        const practiceIndex = activities.indexOf(activity);
+        ([left, right]).forEach((phoneme) => {
+          const teach = findEarliestPhonemeActivity(activities, phoneme);
+          if (!teach) {
+            missingPhonemes.push(phoneme);
+            reasons.push(`缺少 ${phoneme} 的音素活动：还没有单独教学该音素。`);
+          } else if (activities.indexOf(teach) >= practiceIndex) {
+            missingPhonemes.push(phoneme);
+            reasons.push(`缺少更早的 ${phoneme} 音素活动：现有的“${teach.title}”排在挂载练习之后。`);
+          }
+        });
+      }
+      return { card, activity, selfValid: reasons.length === 0, active: false, reasons, missingPhonemes, pairConflictCardId: undefined };
+    });
+
+    // 同一对音素只允许一张卡生效：创建最早的一张优先
+    const winnerByPair = new Map<string, string>();
+    statuses.forEach((status) => {
+      if (!status.selfValid) return;
+      if (!winnerByPair.has(status.card.pairKey)) winnerByPair.set(status.card.pairKey, status.card.id);
+    });
+    statuses.forEach((status) => {
+      if (!status.selfValid) return;
+      const winnerId = winnerByPair.get(status.card.pairKey);
+      status.active = winnerId === status.card.id;
+      if (!status.active) {
+        const winner = statuses.find((item) => item.card.id === winnerId);
+        status.pairConflictCardId = winnerId;
+        status.reasons.push(`这对音素已有生效卡片${winner ? `“${winner.card.leftPhoneme}–${winner.card.rightPhoneme}”` : ''}，同对只保留一张有效卡。`);
+      }
+    });
+    return statuses;
+  }
+
+  function analyzeCourse(current: Course, cardStatusesList: ContrastCardStatus[]): Diagnostic[] {
     const issues: Diagnostic[] = [];
     const learned = new Set<string>();
     const seenPhonemes: Array<{ activity: Activity; phoneme: string }> = [];
@@ -437,10 +614,37 @@
     confusablePairs.forEach(([left, right]) => {
       const leftActivity = seenPhonemes.find((item) => item.phoneme === left)?.activity;
       const rightActivity = seenPhonemes.find((item) => item.phoneme === right)?.activity;
-      if (leftActivity && rightActivity) issues.push({
-        id: `confusable-${left}-${right}`, activityId: rightActivity.id, level: 'info', category: '相似音',
-        title: `${left} 与 ${right} 可能混淆`,
-        detail: `建议在“${leftActivity.title}”和“${rightActivity.title}”之间加入口型对比或辨音练习。`
+      if (leftActivity && rightActivity) {
+        const pairKey = phonemePairKey(left, right);
+        const linked = current.contrastCards.find((card) => card.pairKey === pairKey);
+        const linkedStatus = linked ? cardStatusesList.find((status) => status.card.id === linked.id) : undefined;
+        issues.push({
+          id: `confusable-${pairKey}`, activityId: rightActivity.id, level: 'info', category: '相似音',
+          title: `${left} 与 ${right} 可能混淆`,
+          detail: linked
+            ? linkedStatus?.active
+              ? `已有生效对比卡（${linkedStatus.activity?.title ?? '练习活动'}），学生可做最小对比辨音。`
+              : `已创建对比卡但尚未生效：${linkedStatus?.reasons[0] ?? '请完善卡片内容。'}`
+            : `建议在“${leftActivity.title}”和“${rightActivity.title}”之间加入口型对比或辨音练习，可直接生成对比卡挂到练习活动。`,
+          pair: { left, right, pairKey }
+        });
+      }
+    });
+
+    cardStatusesList.forEach((status) => {
+      if (status.active) return;
+      const pairConflict = Boolean(status.pairConflictCardId);
+      issues.push({
+        id: `contrast-card-${status.card.id}`,
+        activityId: status.activity?.id ?? current.activities[0]?.id ?? '',
+        level: pairConflict ? 'warning' : 'error',
+        category: '辨音对比卡',
+        title: `对比卡 ${status.card.leftPhoneme || '？'}–${status.card.rightPhoneme || '？'} 未生效`,
+        detail: status.reasons.join(' '),
+        pair: {
+          left: status.card.leftPhoneme, right: status.card.rightPhoneme,
+          pairKey: status.card.pairKey
+        }
       });
     });
 
@@ -486,12 +690,12 @@
     const baseMap = new Map(base.activities.map((activity) => [activity.id, activity]));
     const targetMap = new Map(target.activities.map((activity) => [activity.id, activity]));
     for (const activity of base.activities) {
-      if (!targetMap.has(activity.id)) rows.push({ id: activity.id, title: activity.title, kind: 'removed', detail: '目标版本已删除该活动' });
+      if (!targetMap.has(activity.id)) rows.push({ id: activity.id, title: activity.title, kind: 'removed', detail: '目标版本已删除该活动', entity: 'activity' });
     }
     for (const activity of target.activities) {
       const before = baseMap.get(activity.id);
       if (!before) {
-        rows.push({ id: activity.id, title: activity.title, kind: 'added', detail: `${activity.type} · ${activity.duration} 分钟` });
+        rows.push({ id: activity.id, title: activity.title, kind: 'added', detail: `${activity.type} · ${activity.duration} 分钟`, entity: 'activity' });
         continue;
       }
       const fields: string[] = [];
@@ -502,7 +706,39 @@
       if (JSON.stringify(before.dependencies) !== JSON.stringify(activity.dependencies)) fields.push('依赖');
       if (before.prompt !== activity.prompt || before.accessibility !== activity.accessibility) fields.push('提示或无障碍');
       if (before.feedback !== activity.feedback) fields.push('练习反馈');
-      if (fields.length) rows.push({ id: activity.id, title: activity.title, kind: 'changed', detail: `变化字段：${fields.join('、')}` });
+      if (fields.length) rows.push({ id: activity.id, title: activity.title, kind: 'changed', detail: `变化字段：${fields.join('、')}`, entity: 'activity' });
+    }
+
+    const baseCards = base.contrastCards ?? [];
+    const targetCards = target.contrastCards ?? [];
+    const baseCardMap = new Map(baseCards.map((card) => [card.id, card]));
+    const targetCardMap = new Map(targetCards.map((card) => [card.id, card]));
+    const activityName = (version: CourseVersion, activityId: string): string =>
+      version.activities.find((activity) => activity.id === activityId)?.title ?? '已移除的活动';
+    for (const card of baseCards) {
+      if (!targetCardMap.has(card.id)) rows.push({
+        id: card.id, title: `辨音对比卡 ${card.leftPhoneme}–${card.rightPhoneme}`, kind: 'removed',
+        detail: `原挂载于“${activityName(base, card.activityId)}”`, entity: 'contrast-card'
+      });
+    }
+    for (const card of targetCards) {
+      const cardLabel = `辨音对比卡 ${card.leftPhoneme}–${card.rightPhoneme}`;
+      const before = baseCardMap.get(card.id);
+      if (!before) {
+        rows.push({ id: card.id, title: cardLabel, kind: 'added', detail: `挂载于“${activityName(target, card.activityId)}”`, entity: 'contrast-card' });
+        continue;
+      }
+      const fields: string[] = [];
+      if (before.leftPhoneme !== card.leftPhoneme || before.rightPhoneme !== card.rightPhoneme) fields.push('音素');
+      if (before.leftExample !== card.leftExample || before.rightExample !== card.rightExample) fields.push('示例词');
+      if (before.activityId !== card.activityId) {
+        fields.push('挂载活动');
+      }
+      if (fields.length) rows.push({
+        id: card.id, title: cardLabel, kind: 'changed',
+        detail: `变化字段：${fields.join('、')}（现挂载于“${activityName(target, card.activityId)}”）`,
+        entity: 'contrast-card'
+      });
     }
     return rows;
   }
@@ -661,6 +897,73 @@
             <TextArea labelText={selectedActivity.type === '练习' ? '练习反馈（必填）' : '学习反馈'} rows={2} value={selectedActivity.feedback} on:input={(event) => updateActivity('feedback', readText(event))} />
           </Tile>
 
+          <Tile class="contrast-card-tile" id="contrast-cards">
+            <div class="section-title">
+              <div>
+                <span class="kicker">MINIMAL-PAIR CARDS</span>
+                <h3>辨音对比卡</h3>
+                <p>从质量检查的相似音提醒生成；填写左右音素与示例词并挂到练习活动。两个音素都已在该练习之前单独教过时卡片才生效，同一对音素只保留一张有效卡。</p>
+              </div>
+              <Tag type="cool-gray">{cardStatuses.filter((status) => status.active).length}/{course.contrastCards.length} 生效</Tag>
+            </div>
+
+            {#each cardStatuses as status (status.card.id)}
+              {@const card = status.card}
+              <article id="contrast-card-{card.id}" class="contrast-card" class:active={status.active} class:highlight={highlightCardId === card.id}>
+                <header>
+                  <b>对比卡 · {card.leftPhoneme || '？'} vs {card.rightPhoneme || '？'}</b>
+                  <div class="card-badges">
+                    {#if status.active}
+                      <Tag type="green">已生效</Tag>
+                    {:else}
+                      <Tag type="red">未生效</Tag>
+                    {/if}
+                    <Button size="small" kind="ghost" on:click={() => deleteContrastCard(card.id)}>删除</Button>
+                  </div>
+                </header>
+                <div class="contrast-sides">
+                  <div class="contrast-side">
+                    <TextInput labelText="左音素" value={card.leftPhoneme} on:input={(event) => updateContrastCard(card.id, 'leftPhoneme', readText(event))} />
+                    <TextInput labelText="左侧示例词" placeholder="如 map" value={card.leftExample} on:input={(event) => updateContrastCard(card.id, 'leftExample', readText(event))} />
+                  </div>
+                  <span class="contrast-vs" aria-hidden="true">vs</span>
+                  <div class="contrast-side">
+                    <TextInput labelText="右音素" value={card.rightPhoneme} on:input={(event) => updateContrastCard(card.id, 'rightPhoneme', readText(event))} />
+                    <TextInput labelText="右侧示例词" placeholder="如 nap" value={card.rightExample} on:input={(event) => updateContrastCard(card.id, 'rightExample', readText(event))} />
+                  </div>
+                </div>
+                <Select
+                  labelText="挂载到练习活动"
+                  selected={card.activityId}
+                  on:change={(event) => updateContrastCard(card.id, 'activityId', readText(event))}
+                >
+                  <SelectItem value="" text="— 请选择练习活动 —" />
+                  {#each course.activities.filter((activity) => activity.type === '练习') as activity}
+                    <SelectItem value={activity.id} text={activity.title} />
+                  {/each}
+                </Select>
+                {#if !status.active}
+                  <ul class="card-reasons">
+                    {#each status.reasons as reason}
+                      <li>{reason}</li>
+                    {/each}
+                  </ul>
+                  {#if status.missingPhonemes.length && status.activity}
+                    <div class="card-actions">
+                      {#each [...new Set(status.missingPhonemes)] as phoneme}
+                        <Button size="small" kind="tertiary" on:click={() => addMissingPhonemeActivity(phoneme, card.activityId)}>
+                          在“{status.activity.title}”前补建 {phoneme} 音素活动
+                        </Button>
+                      {/each}
+                    </div>
+                  {/if}
+                {/if}
+              </article>
+            {:else}
+              <p class="empty-state">还没有对比卡。在“质量检查”中对相似音提醒点击“生成对比卡”即可。</p>
+            {/each}
+          </Tile>
+
           <Tile class="dependency-card">
             <div class="section-title">
               <div><span class="kicker">PREREQUISITES</span><h3>前置活动与依赖关系</h3><p>只有完成选中的活动后，系统才会按当前顺序推荐本活动。</p></div>
@@ -729,6 +1032,15 @@
                     {#each activity.phonemes as phoneme}<span>{phoneme}</span>{/each}
                     <em>{activity.duration} 分钟</em>
                   </div>
+                  {#if activeCardByActivity.get(activity.id)}
+                    {@const attached = activeCardByActivity.get(activity.id)!}
+                    <div class="lesson-contrast-card">
+                      <strong>辨音对比卡</strong>
+                      <span>{attached.card.leftPhoneme} · {attached.card.leftExample}</span>
+                      <i aria-hidden="true">vs</i>
+                      <span>{attached.card.rightPhoneme} · {attached.card.rightExample}</span>
+                    </div>
+                  {/if}
                   {#if activity.dependencies.length}<small>前置：{activity.dependencies.map((id) => course.activities.find((item) => item.id === id)?.title).filter(Boolean).join('、')}</small>{/if}
                 </div>
               </article>
@@ -748,10 +1060,27 @@
       </div>
       <div class="issue-board">
         {#each diagnostics as issue, index}
+          {@const pair = issue.pair}
+          {@const linkedCard = pair
+            ? course.contrastCards.find((card) => card.pairKey === pair.pairKey)
+            : undefined}
+          {@const linkedActive = linkedCard ? cardStatusMap.get(linkedCard.id)?.active : false}
           <article class:critical={issue.level === 'error'} class:caution={issue.level === 'warning'} class:info={issue.level === 'info'}>
             <span class="issue-index">{String(index + 1).padStart(2, '0')}</span>
-            <div><div class="issue-meta"><Tag type={issue.level === 'error' ? 'red' : issue.level === 'warning' ? 'magenta' : 'blue'}>{issue.category}</Tag><small>{issue.level === 'error' ? '必须处理' : issue.level === 'warning' ? '建议调整' : '教学提示'}</small></div><h3>{issue.title}</h3><p>{issue.detail}</p></div>
-            <Button size="small" kind="ghost" on:click={() => focusIssue(issue)}>定位活动</Button>
+            <div><div class="issue-meta"><Tag type={issue.level === 'error' ? 'red' : issue.level === 'warning' ? 'magenta' : 'blue'}>{issue.category}</Tag><small>{issue.level === 'error' ? '必须处理' : issue.level === 'warning' ? '建议调整' : '教学提示'}</small>{#if linkedActive}<Tag type="green">已有生效对比卡</Tag>{/if}</div><h3>{issue.title}</h3><p>{issue.detail}</p></div>
+            <div class="issue-actions">
+              {#if issue.category === '相似音' && pair}
+                {#if linkedCard}
+                  <Button size="small" kind="tertiary" on:click={() => focusContrastCard(linkedCard.id)}>查看对比卡</Button>
+                {:else}
+                  <Button size="small" kind="primary" on:click={() => createContrastCard(pair.left, pair.right)}>生成对比卡</Button>
+                {/if}
+              {/if}
+              {#if issue.category === '辨音对比卡' && linkedCard}
+                <Button size="small" kind="tertiary" on:click={() => focusContrastCard(linkedCard.id)}>查看对比卡</Button>
+              {/if}
+              <Button size="small" kind="ghost" on:click={() => focusIssue(issue)}>定位活动</Button>
+            </div>
           </article>
         {:else}
           <Tile class="all-clear"><h3>课程检查通过</h3><p>教学顺序、反馈与无障碍说明均已完成。</p></Tile>
@@ -780,7 +1109,7 @@
           {#each course.versions as version, index (version.id)}
             <article class:latest={index === course.versions.length - 1}>
               <span class="timeline-dot"></span>
-              <div><b>{version.label}</b><h4>{version.note}</h4><p>{formatTime(version.savedAt)} · {version.activities.length} 个活动</p></div>
+              <div><b>{version.label}</b><h4>{version.note}</h4><p>{formatTime(version.savedAt)} · {version.activities.length} 个活动 · {(version.contrastCards ?? []).length} 张对比卡</p></div>
             </article>
           {/each}
         </Tile>
@@ -796,9 +1125,9 @@
           </div>
           <div class="diff-list">
             {#each versionDiff as diff}
-              <article class={diff.kind}><span>{diff.kind === 'added' ? '新增' : diff.kind === 'removed' ? '删除' : '修改'}</span><div><b>{diff.title}</b><p>{diff.detail}</p></div></article>
+              <article class={diff.kind} class:card-row={diff.entity === 'contrast-card'}><span>{diff.kind === 'added' ? '新增' : diff.kind === 'removed' ? '删除' : '修改'}</span><div><b>{diff.title}</b>{#if diff.entity === 'contrast-card'}<em class="diff-entity">辨音对比卡</em>{/if}<p>{diff.detail}</p></div></article>
             {:else}
-              <p class="empty-state">两个版本之间没有活动差异，或尚未选择版本。</p>
+              <p class="empty-state">两个版本之间没有活动或对比卡差异，或尚未选择版本。</p>
             {/each}
           </div>
         </Tile>
